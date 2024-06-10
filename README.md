@@ -1,5 +1,5 @@
 # Cpp-version-MATLAB-odesolver
-The repository achieve the major functions  of the MATLAB ode, like ode45 and ode113.
+The repository achieves the major functions  of the MATLAB ode, like ode45 and ode113.
 
 To using `ode45`, run like
 

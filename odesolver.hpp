@@ -21,7 +21,8 @@
 */
 
 
-namespace odesolver {
+namespace odesolver 
+{
 
 	// 实现MATLAB的realmin常数
 	// 经过试验，这是与MATLAB函数等效的
@@ -77,6 +78,16 @@ namespace odesolver {
 		}
 		std::cout << '\n';
 		// 如果这个向量为空就只会打印一个换行符
+	}
+
+	// std::vector<bool> 的打印函数需要单独重载
+	void printVec(const bool_vec& v)
+	{
+		for (auto value : v)
+		{
+			std::cout << value << '\t';
+		}
+		std::cout << '\n';
 	}
 
 	// 重载向量加法运算符
@@ -143,22 +154,24 @@ namespace odesolver {
 
 	// odeset类，指得是微分方程的一些设置
 	struct OdeSet {
-		double AbsTol;
-		double RelTol;
-		double InitialStep;
-		double MaxStep;
-		bool NormControl;
-		event_fun event_f;
+		int OutputMode; // 输出模式
+		double AbsTol; // 绝对容差
+		double RelTol; // 相对容差
+		double InitialStep; // 初始步长
+		double MaxStep; // 最大步长
+		bool NormControl; // 是否容差控制
+		event_fun event_f; // 事件函数
 
 		// 默认构造函数
-		OdeSet() : AbsTol(1.0e-6), RelTol(1.0e-3), InitialStep(0.0),
+		OdeSet() : OutputMode(1), AbsTol(1.0e-6), RelTol(1.0e-3), InitialStep(0.0),
 			MaxStep(0.0), NormControl(false), event_f(nullptr) { /*不做任何事*/
 		};
 
 		// 带参数的构造函数
-		OdeSet(double atol = 1.0e-6, double rtol = 1.0e-3, double h1 = 0.0, double hmax = 0.0,
+		OdeSet(int OutputMode = 1, double atol = 1.0e-6, double rtol = 1.0e-3, double h1 = 0.0, double hmax = 0.0,
 			bool isnormcontrol = false, event_fun f = nullptr)
 		{
+			this->OutputMode = OutputMode;
 			this->AbsTol = atol;
 			this->RelTol = rtol;
 			this->InitialStep = h1;
@@ -172,8 +185,35 @@ namespace odesolver {
 	// odesol类，指的是微分方程的输出
 	struct OdeSol
 	{
+		/*
+			tout -- 用于输出时间序列
+			yout -- 用于输出状态序列
+			te   -- 用于输出事件发生的时间序列
+			ye   -- 用于输出时间发生的状态序列
+			ie   -- 用于输出事件发生的事件序号的布尔值
+		
+			OdeSet的 outputmode == 1 的时候:
+				只输出最后一个时刻的状态，那么只有 yout 会被分配内存,
+				并且yout.size() == 1
+			OdeSet的 outputmode == 2 的时候：
+				只输出 tout 和 yout
+				tout 和 yout 对应中间序列
+				根据 refine 的意义，如果 refine > 1会在中间进行插值
+			OdeSet的 outputmode == 3 的时候：
+				所有的成员变量均会被分配内存
+				tout yout 会输出中间的序列
+				te 会输出发生事件时的时间序列
+				ye 会输出发生事件时的状态
+				ie 会输出发生事件序号的布尔值
+					例如： 总共有三种事件，在第 3 个有事件时刻，
+					发生第 1 种、第 2 种事件，而第 3 种事件没有
+					发生，此时 ie[3-1] = {true, true, false} 
+		*/
 		state_type tout;
 		std::vector<state_type> yout;
+		state_type te;
+		std::vector<state_type>  ye;
+		std::vector<bool_vec> ie;
 	};
 
 	// ode_fun函数类型，可以被ode45函数调用，注意到这里给出了一个额外接口 void* auxdata
@@ -245,7 +285,8 @@ namespace odesolver {
 			temp[jcol].reserve(dim);
 			for (int irow = 0;irow < dim;irow++)
 			{
-				temp[jcol][irow] = 0.0;
+				temp[jcol].push_back(0.0);
+				//temp[jcol][irow] = 0.0;
 				for (int k = 0;k < 7;k++)
 				{
 					temp[jcol][irow] += f[k][irow] * BI[k][jcol];
@@ -258,9 +299,9 @@ namespace odesolver {
 	}
 
 	// 找零点
-	void odezero(event_fun f, state_type& v, double t, state_type& y, double tnew, state_type& ynew,
+	void odezero45(event_fun f, state_type& v, double t, state_type& y, double tnew, state_type& ynew,
 		double t0, double h, state_type f7[7], state_type& tout, std::vector<state_type>& yout,
-		std::vector<bool_vec>& iout, state_type& vnew, bool stop, void* auxdata = NULL)
+		std::vector<bool_vec>& iout, bool* stop, void* auxdata = NULL)
 	{
 		double tol = 128.0 * max(eps(t), eps(tnew));
 		tol = min(tol, fabs(tnew - t));
@@ -268,7 +309,7 @@ namespace odesolver {
 		// std::vector<state_type> yout;
 		// std::vector<bool_vec> iout;
 		int tdir = tnew - t > 0 ? +1 : -1;
-		stop = false;
+		*stop = false;
 		double constexpr rmin = realmin;
 
 		double tL = t;
@@ -278,14 +319,16 @@ namespace odesolver {
 		// state_type vnew(eventdim);
 		bool_vec isterminal(eventdim);
 		int_vec direction(eventdim);
-		f(tnew, ynew, vnew, isterminal, direction, auxdata);
+		// vnew 就是 v
+		f(tnew, ynew, v, isterminal, direction, auxdata);
 
 		double tR = tnew, tswap;
-		state_type yR = ynew, yswap;
-		state_type vR = vnew, vswap;
+		state_type yR = ynew, yswap(odedim);
+		// vnew 就是 v
+		state_type vR = v, vswap(eventdim);
 
-		bool_vec useless1;
-		int_vec useless2;
+		bool_vec useless1(eventdim);
+		int_vec useless2(eventdim);
 		double ttry = tR;
 		double delta;
 		state_type vtry(eventdim), ytry(odedim);
@@ -301,6 +344,7 @@ namespace odesolver {
 					indzc[i] = (sign(vL[i]) != sign(vR[i])) && (direction[i] * (vR[i] - vL[i]) >= 0.0);
 					isempty = isempty || indzc[i];
 				}
+				isempty = !isempty; // 这里要把逻辑取反，才是是否空的布尔值
 				if (isempty)
 				{
 					if (lastmoved != 0)
@@ -384,33 +428,41 @@ namespace odesolver {
 					}
 
 					change = change * fabs(delta);
+
+					// Enforce minimumand maximum change.
 					change = max(0.5 * tol, min(change, fabs(delta) - 0.5 * tol));
 					ttry = tL + tdir * change;
 				}
 
+				// Compute vtry.
 				ntrp45(ttry, t, y, h, f7, ytry);
 				f(ttry, ytry, vtry, useless1, useless2, auxdata); // 只是为了语法不得不加一个
 
+
+				// Check for any crossings between tL and ttry.
 				isempty = false;
 				for (int i = 0;i < eventdim;i++)
 				{
 					indzc[i] = (sign(vL[i]) != sign(vtry[i])) && (direction[i] * (vtry[i] - vL[i]) >= 0.0);
 					isempty = isempty || indzc[i];
 				}
-
+				isempty = !isempty; // 注意，要取反才是真正的isempty
 				if (!isempty)
 				{
+					// Move right end of bracket leftward, remembering the old value.
 					tswap = tR; tR = ttry; ttry = tswap;
 					yswap = yR; yR = ytry; ytry = yswap;
 					vswap = vR; vR = vtry; vtry = vswap;
 
+					// Illinois method.If we've moved leftward twice, halve
+					// vL so we'll move closer next time.
 					if (lastmoved == 2)
 					{
 						double temp;
 						for (int i = 0;i < eventdim;i++)
 						{
-							temp = fabs(0.5 * vL[i]);
-							if (temp > rmin)
+							temp = 0.5 * vL[i];
+							if (fabs(temp) >= rmin)
 							{
 								vL[i] = temp;
 							}
@@ -421,6 +473,7 @@ namespace odesolver {
 				}
 				else
 				{
+					// Move left end of bracket rightward, remembering the old value.
 					tswap = tL; tL = ttry; ttry = tswap;
 					yswap = yL; yL = ytry; ytry = yswap;
 					vswap = vL; vL = vtry; vtry = vswap;
@@ -429,8 +482,8 @@ namespace odesolver {
 						double temp;
 						for (int i = 0;i < eventdim;i++)
 						{
-							temp = fabs(0.5 * vR[i]);
-							if (temp > rmin)
+							temp = 0.5 * vR[i];
+							if (fabs(temp) >= rmin)
 							{
 								vR[i] = temp;
 							}
@@ -462,7 +515,7 @@ namespace odesolver {
 			{
 				if (tL != t0)
 				{
-					stop = true;
+					*stop = true;
 				}
 				break;
 			}
@@ -476,18 +529,20 @@ namespace odesolver {
 				tL = tR + tdir * 0.5 * tol;
 				ntrp45(tL, t, y, h, f7, yL);
 				f(tL, yL, vL, useless1, useless2, auxdata);
-				tR = tnew; yR = ynew; vR = vnew;
+				// vnew 就是 v
+				tR = tnew; yR = ynew; vR = v;
 			}
 			// 明天检测一下
 		}
 	}
 
 	// ode45函数
-	template<int outputmode = 1> // 1代表只输出最后一个时刻的状态，其他表示输出中间时刻的状态
+	// 1代表只输出最后一个时刻的状态，其他表示输出中间时刻的状态
 	void ode45(ode_fun f, double t0, double tf, const state_type& y0, OdeSol* sol, OdeSet* odeset,
 		void* odeargs = nullptr)
 	{
 		// OdeSet赋值
+		int outputmode = odeset->OutputMode;
 		double atol = odeset->AbsTol, rtol = odeset->RelTol;
 		double hmax = odeset->MaxStep, htry = odeset->InitialStep;
 		bool isnormcontrol = odeset->NormControl;
@@ -518,7 +573,7 @@ namespace odesolver {
 		{
 			sol->yout.reserve(1);
 		}
-		else
+		else if( outputmode == 2)
 		{
 			// std::cout << "要Output输出\n";
 			chunk = min(max(100, 50 * refine), refine + floor(2048.0 / dim));
@@ -530,6 +585,19 @@ namespace odesolver {
 			nout = 1;
 			sol->tout.push_back(t);
 			sol->yout.push_back(y);
+		}
+		else if (outputmode == 3)
+		{
+			;
+		}
+
+		state_type valt;
+		if (event_f != nullptr) // 有事件的时候
+		{
+			
+			bool_vec isterminal;
+			int_vec direction;
+			event_f(t0, y0, valt, isterminal, direction, odeargs);
 		}
 
 		/* --------定义一些常数------------*/
@@ -764,15 +832,39 @@ namespace odesolver {
 			// nsteps++;
 
 			// 触发事件
-			if (event_f != nullptr)
+			// 注意，这里必须是给了事件函数，并且输出模式设置为3才可以
+			if (event_f != nullptr && outputmode == 3)
 			{
-				std::vector<state_type> ff({ f1, f2, f3, f4, f5, f6, f7 });
-				// 等后面补充 odezero(event_f, valt, t, y, tnew, ynew, t0, h, ff, );
-				;
+				bool stop;
+				state_type te;
+				std::vector<state_type> ye;
+				std::vector<bool_vec> ie;
+				state_type ff[7] = { f1, f2, f3, f4, f5, f6, f7 };
+				odezero45(event_f, valt, t, y, tnew, ynew, t0, h, ff, te, ye, ie, &stop, odeargs);
+				if (te.size() != 0)
+				{
+					if ( 1 /*如果要输出事件*/)
+					{
+						sol->te.insert(sol->te.end(), te.begin(), te.end());
+						sol->ye.insert(sol->ye.end(), ye.begin(), ye.end());
+						sol->ie.insert(sol->ie.end(), ie.begin(), ie.end());
+					}
+					if (stop) // Stop on a terminal event.
+					{
+						// Update the derivatives using the 
+						// interpolating polynomial.
+						// 插值的功能没实现，因为那些不是需要输出的量
+						
+						tnew = te.back();
+						ynew = ye.back();
+						h = tnew - t;
+						done = true;
+					}
+				}
 			}
 
 			// 输出
-			if (outputmode != 1)
+			if (outputmode == 2)
 			{
 				nout++;
 				int len = sol->tout.size(); // 一般来说nout == len
@@ -825,10 +917,18 @@ namespace odesolver {
 		{
 			sol->yout.push_back(ynew);
 		}
-		else // 如果返回的是一个那啥
+		else if(outputmode == 2) // 如果返回 tout yout
 		{
 			sol->tout.shrink_to_fit();
 			sol->yout.shrink_to_fit();
+		}
+		else if (outputmode == 3) // 如果返回 tout yout te ye ie
+		{
+			sol->tout.shrink_to_fit();
+			sol->yout.shrink_to_fit();
+			sol->te.shrink_to_fit();
+			sol->ye.shrink_to_fit();
+			sol->ie.shrink_to_fit();
 		}
 
 
@@ -855,7 +955,7 @@ namespace odesolver {
 		// 这里要矫正一下，因为默认hmax = 0，这是不能用的
 		if (hmax == 0.0) { hmax = 0.1 * htspan; }
 		double t = t0;
-		state_type y(y0), yp;
+		state_type y(y0), yp(dim);
 		state_type f0(dim);
 		odeFcn(t0, y0, f0, odeargs);
 		yp = f0;
